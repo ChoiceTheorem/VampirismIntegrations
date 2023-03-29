@@ -7,11 +7,14 @@ import de.teamlapen.vampirism.api.EnumStrength;
 import de.teamlapen.vampirism.api.entity.convertible.IConvertedCreature;
 import de.teamlapen.vampirism.api.entity.convertible.IConvertingHandler;
 import de.teamlapen.vampirism.api.entity.convertible.ICurableConvertedCreature;
+import de.teamlapen.vampirism.core.ModAdvancements;
 import de.teamlapen.vampirism.core.ModVillage;
+import de.teamlapen.vampirism.entity.ExtendedCreature;
 import de.teamlapen.vampirism.entity.player.vampire.VampirePlayer;
 import de.teamlapen.vampirism.entity.villager.Trades;
 import de.teamlapen.vampirism.util.DamageHandler;
 import de.teamlapen.vampirism.util.Helper;
+import de.teamlapen.vampirism_integrations.util.REFERENCE;
 import forge.net.mca.entity.VillagerEntityMCA;
 import forge.net.mca.entity.ai.brain.VillagerTasksMCA;
 import forge.net.mca.entity.ai.relationship.AgeState;
@@ -25,7 +28,6 @@ import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.util.Mth;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.effect.MobEffectInstance;
@@ -45,6 +47,9 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelAccessor;
 import net.minecraftforge.event.ForgeEventFactory;
+import net.minecraftforge.fml.ModContainer;
+import net.minecraftforge.fml.ModList;
+import net.minecraftforge.forgespi.language.IModInfo;
 import net.minecraftforge.registries.ForgeRegistries;
 
 import javax.annotation.Nonnull;
@@ -56,6 +61,7 @@ import java.util.UUID;
 public class ConvertedVillagerEntityMCA extends VillagerEntityMCA implements ICurableConvertedCreature<VillagerEntityMCA> {
 
     public static final List<SensorType<? extends Sensor<? super Villager>>> SENSOR_TYPES;
+    private static final byte EVENT_ID_CURE = 40;
     private static final EntityDataAccessor<Boolean> CONVERTING;
 
     static {
@@ -134,7 +140,7 @@ public class ConvertedVillagerEntityMCA extends VillagerEntityMCA implements ICu
         if (this.conversationStarter != null) {
             Player playerentity = world.getPlayerByUUID(this.conversationStarter);
             if (playerentity instanceof ServerPlayer) {
-                //ModAdvancements.TRIGGER_CURED_VAMPIRE_VILLAGER.trigger((ServerPlayer)playerentity, this, villager); TODO wait for new Vampirism version
+                ModAdvancements.TRIGGER_CURED_VAMPIRE_VILLAGER.trigger((ServerPlayer) playerentity, this, villager);
                 world.onReputationEvent(ReputationEventType.ZOMBIE_VILLAGER_CURED, playerentity, villager);
             }
         }
@@ -178,6 +184,14 @@ public class ConvertedVillagerEntityMCA extends VillagerEntityMCA implements ICu
 
     @Override
     public void handleEntityEvent(byte id) {
+        //MCA villagers use 16 as sound event for reward hearts. ICurableConvertedCreature uses 16 for curing sound
+        //We use SOUND_ID_CURE
+        if (id == 16) {
+            super.handleEntityEvent(id);
+            return;
+        } else if (id == EVENT_ID_CURE) {
+            id = 16;
+        }
         if (!this.handleSound(id, this)) {
             super.handleEntityEvent(id);
         }
@@ -223,6 +237,8 @@ public class ConvertedVillagerEntityMCA extends VillagerEntityMCA implements ICu
     @Override
     public void startConverting(@Nullable UUID conversionStarterIn, int conversionTimeIn, @Nonnull PathfinderMob entity) {
         ICurableConvertedCreature.super.startConverting(conversionStarterIn, conversionTimeIn, entity);
+        entity.level.broadcastEntityEvent(entity, EVENT_ID_CURE); //Use our own id to avoid clash with MCA reward hearts event
+
         this.conversationStarter = conversionStarterIn;
         this.conversionTime = conversionTimeIn;
     }
@@ -286,11 +302,14 @@ public class ConvertedVillagerEntityMCA extends VillagerEntityMCA implements ICu
 
         @Override
         public IConvertedCreature<VillagerEntityMCA> createFrom(VillagerEntityMCA entity) {
-            CompoundTag nbt = new CompoundTag();
-            entity.saveWithoutId(nbt);
             Villager converted = (entity.getGenetics().getGender() == Gender.FEMALE ? MCARegistration.FEMALE_CONVERTED_VILLAGER : MCARegistration.MALE_CONVERTED_VILLAGER).get().create(entity.level);
-            converted.load(nbt);
-            converted.setUUID(Mth.createInsecureUUID(converted.getRandom()));
+            CompoundTag nbtExtended = new CompoundTag();
+            ExtendedCreature.getSafe(converted).ifPresent(ec -> ec.saveData(nbtExtended));
+            converted.restoreFrom(entity);
+            ExtendedCreature.getSafe(converted).ifPresent(ec -> ec.loadData(nbtExtended));
+            if (ModList.get().getModContainerById(REFERENCE.VAMPIRISM_ID).map(ModContainer::getModInfo).map(IModInfo::getVersion).map(version -> version.getMinorVersion() <= 9 && version.getIncrementalVersion() <= 3).orElse(true)) {
+                entity.discard(); //Force discard the entity ourselves. Older Vampirism versions add the new entity first and thereby cause an UUID conflict
+            }
             converted.yBodyRot = entity.yBodyRot;
             converted.yHeadRot = entity.yHeadRot;
             return (IConvertedCreature<VillagerEntityMCA>) converted;
